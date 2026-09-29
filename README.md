@@ -8,8 +8,8 @@ Default policy:
 - <=40%: shut down running VMs gracefully
 - after 120s: force-destroy remaining VMs
 - <=25%: schedule host poweroff after 30s
-- AC restored below 30%: keep VMs stopped
-- AC restored at/above 30%: restart only VMs saved as running before protection, and only while libvirt autostart remains enabled
+- AC restored below 45%: keep VMs stopped
+- AC restored at/above 45%: restart only VMs saved as running before protection, and only while libvirt autostart remains enabled
 
 ## Install
 
