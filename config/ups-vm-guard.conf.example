@@ -1,12 +1,40 @@
 # Find UPS names with: upsc -l
-UPS_NAME="eaton"
+# UPS_NAME="eaton"
+
+## VM policy
+# UPS battery level at which VMs are requested to shutdown gracefully
 VM_SHUTDOWN_PERCENT=40
+
+# UPS battery level at which VMs are started again
 VM_RESTART_PERCENT=45
-HOST_SHUTDOWN_PERCENT=25
-HOST_SHUTDOWN_DELAY=30
+
+# Maximum time allowed for graceful shutdown of VM
 VM_SHUTDOWN_TIMEOUT=120
+
+## Host policy
+# UPS battery level at which host shutdown is initiated
+HOST_SHUTDOWN_PERCENT=25
+
+# Delay after shutdown initiation expressed in seconds before an actual shutdown
+HOST_SHUTDOWN_DELAY=30
+
+# Find UPS names with: upsc -l
+
+## Paths
+# Change those only if you have a good reason to
+
+# Defines where runtime files are stored. That is STATE_FILE and LOCK_FILE
 STATE_DIR="/run/nut"
+
+# Stores names of VMs that are gracefully shutdown (only those marked with autostart)
+# as a source for restarting if AC is back online 
 STATE_FILE="/run/nut/vm-shutdown.state"
+
+# Lock file that prevents parallel executions
 LOCK_FILE="/run/nut/ups-vm-guard.lock"
+
+# Where logs are stored
 LOG_DIR="/var/log/nut"
+
+# Name of systemd timer used as shutdown command
 HOST_SHUTDOWN_TIMER="nut-host-shutdown.timer"
