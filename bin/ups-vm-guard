@@ -3,7 +3,7 @@
 set -u
 set -o pipefail
 
-CONFIG="/etc/nut/nut-battery-manager.conf"
+CONFIG="/etc/nut/ups-vm-guard.conf"
 
 if [[ -r "$CONFIG" ]]; then
     # shellcheck disable=SC1090
@@ -22,13 +22,13 @@ fi
 
 STATE_DIR="/run/nut"
 STATE_FILE="$STATE_DIR/vm-shutdown.state"
-LOCK_FILE="$STATE_DIR/battery-manager.lock"
+LOCK_FILE="$STATE_DIR/ups-vm-guard.lock"
 
 HOST_TIMER="nut-host-shutdown.timer"
 HOST_SERVICE="nut-host-shutdown.service"
 
 LOG_DIR="/var/log/nut"
-LOG_FILE="$LOG_DIR/nut-battery-manager-$(date '+%Y%m%d').log"
+LOG_FILE="$LOG_DIR/ups-vm-guard-$(date '+%Y%m%d').log"
 
 mkdir -p "$STATE_DIR" "$LOG_DIR"
 chmod 0750 "$STATE_DIR" "$LOG_DIR"
@@ -47,7 +47,7 @@ log()
         "$msg" >> "$LOG_FILE"
 
     # Also put important information into journald.
-    /usr/bin/logger -t nut-battery-manager -- "$msg" 2>/dev/null || true
+    /usr/bin/logger -t ups-vm-guard -- "$msg" 2>/dev/null || true
 }
 
 die()
