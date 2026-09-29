@@ -1,0 +1,2 @@
+#!/bin/bash
+exec /usr/bin/systemctl start --no-block ups-vm-guard.service

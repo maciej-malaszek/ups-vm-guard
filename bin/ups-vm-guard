@@ -1,0 +1,372 @@
+#!/bin/bash
+
+set -u
+set -o pipefail
+
+CONFIG="/etc/nut/nut-battery-manager.conf"
+
+if [[ -r "$CONFIG" ]]; then
+    # shellcheck disable=SC1090
+    source "$CONFIG"
+else
+    echo "ERROR: missing $CONFIG" >&2
+    exit 1
+fi
+
+: "${UPS_NAME:?UPS_NAME is not configured}"
+: "${VM_SHUTDOWN_PERCENT:=30}"
+: "${VM_RESTART_PERCENT:=30}"
+: "${HOST_SHUTDOWN_PERCENT:=23}"
+: "${HOST_SHUTDOWN_DELAY:=30}"
+: "${VM_SHUTDOWN_TIMEOUT:=120}"
+
+STATE_DIR="/run/nut"
+STATE_FILE="$STATE_DIR/vm-shutdown.state"
+LOCK_FILE="$STATE_DIR/battery-manager.lock"
+
+HOST_TIMER="nut-host-shutdown.timer"
+HOST_SERVICE="nut-host-shutdown.service"
+
+LOG_DIR="/var/log/nut"
+LOG_FILE="$LOG_DIR/nut-battery-manager-$(date '+%Y%m%d').log"
+
+mkdir -p "$STATE_DIR" "$LOG_DIR"
+chmod 0750 "$STATE_DIR" "$LOG_DIR"
+
+exec 9>"$LOCK_FILE"
+
+if ! flock -n 9; then
+    exit 0
+fi
+
+log()
+{
+    local msg="$*"
+    printf '%s %s\n' \
+        "$(date '+%Y-%m-%d %H:%M:%S%z')" \
+        "$msg" >> "$LOG_FILE"
+
+    # Also put important information into journald.
+    /usr/bin/logger -t nut-battery-manager -- "$msg" 2>/dev/null || true
+}
+
+die()
+{
+    log "ERROR: $*"
+    exit 1
+}
+
+get_battery()
+{
+    local value
+
+    value=$(
+        /usr/bin/upsc "$UPS_NAME" battery.charge 2>/dev/null
+    ) || return 1
+
+    [[ "$value" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 1
+
+    printf '%s\n' "$value"
+}
+
+get_status()
+{
+    /usr/bin/upsc "$UPS_NAME" ups.status 2>/dev/null
+}
+
+host_shutdown_pending()
+{
+    /usr/bin/systemctl is-active --quiet "$HOST_TIMER"
+}
+
+cancel_host_shutdown()
+{
+    if host_shutdown_pending; then
+        log "AC restored / recovery: cancelling pending host shutdown"
+        /usr/bin/systemctl stop "$HOST_TIMER" || \
+            log "WARNING: failed to cancel $HOST_TIMER"
+    fi
+}
+
+is_vm_running()
+{
+    local vm="$1"
+
+    /usr/bin/virsh domstate "$vm" 2>/dev/null |
+        grep -qx 'running'
+}
+
+get_running_vms()
+{
+    /usr/bin/virsh list \
+        --name \
+        --state-running \
+        2>/dev/null |
+        sed '/^[[:space:]]*$/d'
+}
+
+get_autostart_running_vms()
+{
+    local vm
+
+    while IFS= read -r vm; do
+        [[ -z "$vm" ]] && continue
+
+        if /usr/bin/virsh list \
+            --name \
+            --state-running \
+            --autostart 2>/dev/null |
+            grep -Fxq "$vm"; then
+
+            printf '%s\n' "$vm"
+        fi
+    done < <(get_running_vms)
+}
+
+save_vm_state()
+{
+    local tmp
+
+    tmp="${STATE_FILE}.tmp"
+
+    {
+        echo "# VMs running when UPS protection shutdown began"
+        echo "# Only autostart VMs are recorded."
+
+        get_autostart_running_vms
+    } > "$tmp"
+
+    chmod 0640 "$tmp"
+    chown root:nut "$tmp"
+
+    mv -f "$tmp" "$STATE_FILE"
+
+    log "Saved VM restart state:"
+    sed 's/^/  /' "$STATE_FILE" >> "$LOG_FILE"
+}
+
+request_vm_shutdown()
+{
+    local vm
+
+    log "Requesting graceful shutdown of all running VMs"
+
+    while IFS= read -r vm; do
+        [[ -z "$vm" ]] && continue
+
+        log "VM '$vm': virsh shutdown"
+
+        if ! /usr/bin/virsh shutdown "$vm" >/dev/null 2>&1; then
+            log "WARNING: VM '$vm': graceful shutdown request failed"
+        fi
+    done < <(get_running_vms)
+}
+
+wait_for_vms()
+{
+    local deadline
+    local vm
+    local running=0
+
+    deadline=$(( $(date +%s) + VM_SHUTDOWN_TIMEOUT ))
+
+    log "Waiting up to ${VM_SHUTDOWN_TIMEOUT}s for VMs to shut down"
+
+    while (( $(date +%s) < deadline )); do
+
+        running=0
+
+        while IFS= read -r vm; do
+            [[ -z "$vm" ]] && continue
+            running=1
+            break
+        done < <(get_running_vms)
+
+        if (( running == 0 )); then
+            log "All VMs shut down gracefully"
+            return 0
+        fi
+
+        sleep 5
+    done
+
+    log "WARNING: VM shutdown timeout expired"
+
+    return 1
+}
+
+force_stop_remaining_vms()
+{
+    local vm
+
+    while IFS= read -r vm; do
+        [[ -z "$vm" ]] && continue
+
+        log "VM '$vm': graceful shutdown failed; forcing destroy"
+
+        if ! /usr/bin/virsh destroy "$vm" >/dev/null 2>&1; then
+            log "ERROR: VM '$vm': virsh destroy failed"
+        fi
+    done < <(get_running_vms)
+}
+
+shutdown_vms()
+{
+    if [[ -f "$STATE_FILE" ]]; then
+        log "VM shutdown state already exists; not overwriting it"
+    else
+        save_vm_state
+    fi
+
+    request_vm_shutdown
+
+    if ! wait_for_vms; then
+        force_stop_remaining_vms
+    fi
+}
+
+restart_saved_vms()
+{
+    local vm
+    local started=0
+
+    [[ -f "$STATE_FILE" ]] || {
+        log "No saved VM shutdown state; nothing to restart"
+        return 0
+    }
+
+    log "Battery recovered; restarting saved VMs"
+
+    while IFS= read -r vm; do
+        [[ -z "$vm" ]] && continue
+        [[ "$vm" =~ ^# ]] && continue
+
+        # Don't start it if somebody disabled autostart while it was down.
+        if ! /usr/bin/virsh list \
+            --all \
+            --name \
+            --autostart 2>/dev/null |
+            grep -Fxq "$vm"; then
+
+            log "VM '$vm': autostart disabled; not restarting"
+            continue
+        fi
+
+        if is_vm_running "$vm"; then
+            log "VM '$vm': already running"
+            continue
+        fi
+
+        log "VM '$vm': starting"
+
+        if /usr/bin/virsh start "$vm" >/dev/null 2>&1; then
+            started=$((started + 1))
+        else
+            log "ERROR: VM '$vm': failed to start"
+        fi
+
+    done < "$STATE_FILE"
+
+    rm -f "$STATE_FILE"
+
+    log "VM recovery complete; started $started VM(s)"
+}
+
+handle_recovery()
+{
+    local battery="$1"
+
+    cancel_host_shutdown
+
+    if (( ${battery%.*} >= VM_RESTART_PERCENT )); then
+
+        if [[ -f "$STATE_FILE" ]]; then
+            restart_saved_vms
+        else
+            log "Battery recovered to ${battery}%; no VM shutdown state exists"
+        fi
+
+    else
+        log "AC is restored but battery is only ${battery}%; waiting for >= ${VM_RESTART_PERCENT}% before VM restart"
+    fi
+}
+
+handle_battery()
+{
+    local battery="$1"
+
+    if (( ${battery%.*} <= VM_SHUTDOWN_PERCENT )); then
+
+        if [[ ! -f "$STATE_FILE" ]]; then
+            log "Battery ${battery}% <= ${VM_SHUTDOWN_PERCENT}%; initiating VM shutdown"
+            shutdown_vms
+        else
+            log "Battery ${battery}% <= ${VM_SHUTDOWN_PERCENT}%; VM shutdown already active"
+
+            # Protect against VMs manually started while battery protection
+            # is already active.
+            if [[ -n "$(get_running_vms)" ]]; then
+                request_vm_shutdown
+            fi
+        fi
+    fi
+
+    # Check the current value again after VM shutdown.
+    battery=$(get_battery) || die "cannot read battery.charge after VM shutdown"
+
+    if (( ${battery%.*} <= HOST_SHUTDOWN_PERCENT )); then
+
+        if host_shutdown_pending; then
+            log "Battery ${battery}% <= ${HOST_SHUTDOWN_PERCENT}%; host shutdown timer already active"
+        else
+            log "Battery ${battery}% <= ${HOST_SHUTDOWN_PERCENT}%; scheduling host shutdown in ${HOST_SHUTDOWN_DELAY}s"
+
+            if /usr/bin/systemctl start "$HOST_TIMER"; then
+                log "Host shutdown timer started"
+            else
+                log "ERROR: failed to start host shutdown timer"
+            fi
+        fi
+    fi
+}
+
+main()
+{
+    local battery
+    local status
+
+    battery=$(get_battery) || {
+        log "ERROR: unable to read battery.charge from UPS '$UPS_NAME'"
+        exit 1
+    }
+
+    status=$(get_status) || {
+        log "ERROR: unable to read ups.status from UPS '$UPS_NAME'"
+        exit 1
+    }
+
+    log "UPS status='$status', battery=${battery}%"
+
+    #
+    # AC is considered restored only when UPS reports OL.
+    #
+    if [[ "$status" == *"OL"* ]]; then
+        handle_recovery "$battery"
+        exit 0
+    fi
+
+    #
+    # On battery.
+    #
+    if [[ "$status" == *"OB"* ]]; then
+        handle_battery "$battery"
+        exit 0
+    fi
+
+    #
+    # Unknown/abnormal status.
+    #
+    log "WARNING: UPS status '$status' is neither clearly OL nor OB; taking no percentage-based action"
+}
+
+main "$@"

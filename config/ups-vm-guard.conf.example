@@ -1,0 +1,12 @@
+# Find UPS names with: upsc -l
+UPS_NAME="eaton"
+VM_SHUTDOWN_PERCENT=30
+VM_RESTART_PERCENT=35
+HOST_SHUTDOWN_PERCENT=25
+HOST_SHUTDOWN_DELAY=30
+VM_SHUTDOWN_TIMEOUT=120
+STATE_DIR="/run/nut"
+STATE_FILE="/run/nut/vm-shutdown.state"
+LOCK_FILE="/run/nut/battery-manager.lock"
+LOG_DIR="/var/log/nut"
+HOST_SHUTDOWN_TIMER="nut-host-shutdown.timer"

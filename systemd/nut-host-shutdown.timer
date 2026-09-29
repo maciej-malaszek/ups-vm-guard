@@ -1,0 +1,7 @@
+[Unit]
+Description=Delayed NUT emergency host poweroff
+
+[Timer]
+OnActiveSec=30s
+AccuracySec=1s
+Unit=nut-host-shutdown.service

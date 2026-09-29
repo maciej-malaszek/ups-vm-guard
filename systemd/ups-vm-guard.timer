@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodic NUT battery protection evaluation
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=60s
+AccuracySec=1s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

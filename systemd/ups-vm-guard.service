@@ -1,0 +1,8 @@
+[Unit]
+Description=NUT battery/VM protection manager
+After=nut-monitor.service nut-monitor.target libvirtd.service virtqemud.service
+Wants=libvirtd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ups-vm-guard
